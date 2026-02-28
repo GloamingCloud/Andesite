@@ -19,6 +19,7 @@ fn main() -> uefi::Status {
 
 fn bootloader_inner() -> Result<()> {
     let kernel_slice = read_file("kernel")?;
+    let parsed_kernel = elf::ElfB
 }
 
 fn read_file(filename: &str) -> Result<&[u8]> {

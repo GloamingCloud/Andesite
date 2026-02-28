@@ -1,48 +1,33 @@
 {
-  description = "Andesite, a toy operating system";
-
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    fenix.url = "github:nix-community/fenix";
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      rust-overlay,
-      flake-utils,
+      fenix,
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-        rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
-          targets = [
-            "x86_64-unknown-uefi"
-            "x86_64-unknown-none"
-          ];
-          extensions = [ "rust-src" ];
-        };
-      in
-      {
-        devShells.default =
-          with pkgs;
-          mkShell {
-            buildInputs = [
-              qemu
-              rustToolchain
-            ];
-
-            shellHook = ''
-              echo "Rust version: $(rustc --version)"
-              echo "QEMU version: $(qemu-system-x86_64 --version | head -n 1)"
-            '';
-          };
-      }
-    );
+    let
+      system = "x86_64-linux";
+      pkgs = nixpkgs.legacyPackages.${system};
+      toolchain = fenix.packages.${system}.fromToolchainFile {
+        file = ./rust-toolchain.toml;
+        sha256 = "sha256-vhDlEebuggsbvmo60PHo61saUFGasTQiOS4+hRgwvsY=";
+      };
+    in
+    {
+      devShells.${system}.default = pkgs.mkShell {
+        buildInputs = with pkgs; [
+          toolchain
+          qemu
+        ];
+        shellHook = ''
+          echo "Rust version: $(rustc --version)"
+          echo "QEMU version: $(qemu-system-x86_64 --version | head -n 1)"
+        '';
+      };
+    };
 }
