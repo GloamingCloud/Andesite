@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 uefi = { version = "0.36.1", features= ["panic_handler"] }
-elf = { version = "0.8.0", default-features =false }
+elf = { version = "0.8.0", default-features = false }
+x86_64 = "0.15.4"

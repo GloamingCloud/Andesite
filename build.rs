@@ -6,7 +6,7 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     fetch_ovmf();
     build_bootloader();
-    // build_kernel();
+    build_kernel();
 }
 
 fn fetch_ovmf() {

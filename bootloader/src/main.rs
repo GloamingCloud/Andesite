@@ -1,25 +1,76 @@
+#![no_std]
+#![no_main]
+
+use elf::{abi::PT_LOAD, endian::AnyEndian};
 use uefi::{
-    CStr16, Identify, Result,
-    boot::{self, AllocateType, MemoryType, SearchType},
-    println,
-    proto::media::{
+    CStr16, Error, Identify, Result, Status, boot::{self, AllocateType, MemoryDescriptor, MemoryType, SearchType}, mem::memory_map::{MemoryMap, MemoryMapIter}, println, proto::media::{
         file::{File, FileAttribute, FileInfo, FileMode, FileType},
         fs::SimpleFileSystem,
-    },
+    }
 };
+use x86_64::structures::paging::{FrameAllocator, Size4KiB};
+
+struct UefiFrameAllocator<'a> {
+    iter: MemoryMapIter<'a>,
+    current_region: Option<&'a MemoryDescriptor>,
+    next_page: u64,
+}
+
+impl<'a> UefiFrameAllocator<'a> {
+    fn new(iter: MemoryMapIter<'a>) -> Self {
+        Self {
+            iter,
+            current_region: None,
+            next_page: 0,
+        }
+    }
+}
+
+unsafe impl FrameAllocator<Size4KiB> for UefiFrameAllocator<'_> {
+    fn allocate_frame(&mut self) -> Option<x86_64::structures::paging::PhysFrame<Size4KiB>> {
+        loop {
+            if let Some(desc) = self.current_region {
+                let start = desc.phys_start;
+                let end = start + (desc.page_count * 4096);
+
+                if self.next_page < start {
+                    self.next_page = start;
+                }
+
+                if self.next_page == 0 {
+                    self.next_page = 4096;
+                }
+
+                if self.next_page < end {
+                    let frame = x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(self.next_page));
+                    self.next_page += 4096;
+                    return Some(frame);
+                }
+            }
+
+            self.current_region = self.iter.find(|d| d.ty == MemoryType::CONVENTIONAL);
+            if self.current_region.is_none() { return None; }
+        }
+    }
+}
 
 #[uefi::entry]
 fn main() -> uefi::Status {
     bootloader_inner().unwrap();
 
-    loop {}
-
     unreachable!()
 }
 
 fn bootloader_inner() -> Result<()> {
-    let kernel_slice = read_file("kernel")?;
-    let parsed_kernel = elf::ElfB
+    let kernel_slice = read_file("kernel").unwrap();
+    let parsed_kernel = elf::ElfBytes::<AnyEndian>::minimal_parse(kernel_slice)
+        .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
+
+    let mmap_iter = boot::memory_map(MemoryType::LOADER_DATA)?;
+
+    let mut frame_allocator = UefiFrameAllocator::new(mmap_iter.entries());
+
+    Ok(())
 }
 
 fn read_file(filename: &str) -> Result<&[u8]> {

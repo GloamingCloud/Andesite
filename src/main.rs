@@ -18,7 +18,7 @@ fn main() {
 
     fs::copy(env!("BOOTLOADER_OUT"), boot.join("bootx64.efi"))
         .expect("failed to copy bootloader.efi");
-    // fs::copy(env!("KERNEL_OUT"), esp.join("kernel")).expect("failed to copy kernel");
+    fs::copy(env!("KERNEL_OUT"), esp.join("kernel")).expect("failed to copy kernel");
 
     let mut qemu_cmd = Command::new("qemu-system-x86_64");
     // qemu_cmd.args(vec!["-s", "-S"]);
