@@ -1,15 +1,9 @@
 #![no_std]
 #![no_main]
 
-use core::fmt;
+mod logger;
 
-use conquer_once::spin::OnceCell;
 use elf::endian::AnyEndian;
-use noto_sans_mono_bitmap::{
-    FontWeight, RasterHeight, RasterizedChar, get_raster, get_raster_width,
-};
-use spinning_top::Spinlock;
-use uart_16550::Uart16550;
 use uefi::{
     CStr16, Error, Identify, Result, Status,
     boot::{self, AllocateType, MemoryDescriptor, MemoryType, SearchType},
@@ -28,207 +22,7 @@ use x86_64::{
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
-static LOGGER: OnceCell<LockedLogger> = OnceCell::uninit();
-
-struct LockedLogger {
-    framebuffer: Spinlock<FrameBufferWriter>,
-    serial: Spinlock<SerialWriter>,
-}
-
-impl LockedLogger {
-    fn new(framebuffer: &'static mut [u8], info: FrameBufferInfo) -> Self {
-        Self {
-            framebuffer: Spinlock::new(FrameBufferWriter::new(framebuffer, info)),
-            serial: Spinlock::new(unsafe { SerialWriter::new() }),
-        }
-    }
-
-    unsafe fn force_unlock(&self) {
-        unsafe {
-            self.framebuffer.force_unlock();
-            self.serial.force_unlock();
-        }
-    }
-}
-
-impl log::Log for LockedLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
-    }
-
-    fn log(&self, record: &log::Record) {
-        use core::fmt::Write;
-
-        let file = record.file().unwrap_or("<unknown>");
-        let line = record.line().unwrap_or(0);
-
-        let framebuffer = &mut self.framebuffer.lock();
-        writeln!(
-            framebuffer,
-            "[{:5}] [{}:{}] - {}",
-            record.level(),
-            file,
-            line,
-            record.args()
-        )
-        .unwrap();
-
-        let mut serial = self.serial.lock();
-        writeln!(
-            serial,
-            "[{:5}] [{}:{}] - {}",
-            record.level(),
-            file,
-            line,
-            record.args()
-        )
-        .unwrap();
-    }
-
-    fn flush(&self) {}
-}
-
-const BORDER_PADDING: usize = 1;
-const LINE_SPACING: usize = 2;
-const LETTER_SPACING: usize = 0;
-
-mod font_constants {
-    use super::*;
-
-    pub const CHAR_RASTER_HEIGHT: RasterHeight = RasterHeight::Size16;
-    pub const CHAR_RASTER_WIDTH: usize = get_raster_width(FontWeight::Regular, CHAR_RASTER_HEIGHT);
-    pub const BACKUP_CHAR: char = '�';
-    pub const FONT_WEIGHT: FontWeight = FontWeight::Regular;
-}
-
-struct FrameBufferWriter {
-    framebuffer: &'static mut [u8],
-    info: FrameBufferInfo,
-    x_pos: usize,
-    y_pos: usize,
-}
-
-impl FrameBufferWriter {
-    fn new(framebuffer: &'static mut [u8], info: FrameBufferInfo) -> Self {
-        let mut logger = Self {
-            framebuffer,
-            info,
-            x_pos: 0,
-            y_pos: 0,
-        };
-        logger.clear();
-        logger
-    }
-
-    fn width(&self) -> usize {
-        self.info.width
-    }
-
-    fn height(&self) -> usize {
-        self.info.height
-    }
-
-    fn clear(&mut self) {
-        self.x_pos = BORDER_PADDING;
-        self.y_pos = BORDER_PADDING;
-        self.framebuffer.fill(0);
-    }
-
-    fn newline(&mut self) {
-        self.y_pos += font_constants::CHAR_RASTER_HEIGHT.val() + LINE_SPACING;
-        self.carriage_return();
-    }
-
-    fn carriage_return(&mut self) {
-        self.x_pos = BORDER_PADDING;
-    }
-
-    fn write_pixel(&mut self, x: usize, y: usize, intensity: u8) {
-        let pixel_offset = y * self.info.stride + x;
-        let color = match self.info.pixel_format {
-            PixelFormat::Rgb => [intensity, intensity, intensity / 2, 0],
-            PixelFormat::Bgr => [intensity / 2, intensity, intensity, 0],
-        };
-        let byte_offset = pixel_offset * 4;
-        self.framebuffer[byte_offset..(byte_offset + 4)].copy_from_slice(&color[..4]);
-        let _ = unsafe {
-            core::ptr::read_volatile(&self.framebuffer[byte_offset]);
-        };
-    }
-
-    fn write_rendered_char(&mut self, rendered_char: RasterizedChar) {
-        for (y, row) in rendered_char.raster().iter().enumerate() {
-            for (x, byte) in row.iter().enumerate() {
-                self.write_pixel(self.x_pos + x, self.y_pos + y, *byte);
-            }
-        }
-
-        self.x_pos += rendered_char.width() + LETTER_SPACING;
-    }
-
-    fn write_char(&mut self, c: char) {
-        match c {
-            '\n' => self.newline(),
-            '\r' => self.carriage_return(),
-            c => {
-                let new_x_pos = self.x_pos + font_constants::CHAR_RASTER_WIDTH;
-                if new_x_pos >= self.width() {
-                    self.newline();
-                }
-                let new_y_pos =
-                    self.y_pos + font_constants::CHAR_RASTER_HEIGHT.val() + BORDER_PADDING;
-                if new_y_pos >= self.height() {
-                    self.clear();
-                }
-                self.write_rendered_char(
-                    get_raster(
-                        c,
-                        font_constants::FONT_WEIGHT,
-                        font_constants::CHAR_RASTER_HEIGHT,
-                    )
-                    .unwrap_or_else(|| {
-                        get_raster(
-                            font_constants::BACKUP_CHAR,
-                            font_constants::FONT_WEIGHT,
-                            font_constants::CHAR_RASTER_HEIGHT,
-                        )
-                        .expect("should not panic")
-                    }),
-                );
-            }
-        }
-    }
-}
-
-impl fmt::Write for FrameBufferWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            self.write_char(c)
-        }
-
-        Ok(())
-    }
-}
-
-struct SerialWriter {
-    port: uart_16550::Uart16550<uart_16550::backend::PioBackend>,
-}
-
-impl SerialWriter {
-    unsafe fn new() -> Self {
-        let mut port = unsafe { Uart16550::new_port(0x3f8) }.unwrap();
-        port.init(uart_16550::Config::default()).unwrap();
-        Self { port }
-    }
-}
-
-impl fmt::Write for SerialWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.port.send_bytes_exact(s.as_bytes());
-
-        Ok(())
-    }
-}
+use crate::logger::LockedLogger;
 
 struct UefiFrameAllocator<'a> {
     iter: MemoryMapIter<'a>,
@@ -286,18 +80,18 @@ fn main() -> uefi::Status {
 }
 
 fn bootloader_inner() -> Result<()> {
+    let framebuffer = init_logger()?;
+    log::info!("Something isn't it?");
+
     let kernel_slice = read_file("kernel").unwrap();
     let parsed_kernel = elf::ElfBytes::<AnyEndian>::minimal_parse(kernel_slice)
         .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
-
-    let framebuffer = init_logger()?;
-    log::info!("Something isn't it?");
 
     let mut mmap_iter = unsafe { boot::exit_boot_services(None) };
     mmap_iter.sort();
     let mut frame_allocator = UefiFrameAllocator::new(mmap_iter.entries());
 
-    let page_tables = create_page_tables(&mut frame_allocator, &framebuffer)?;
+    let page_tables = create_page_tables(&mut frame_allocator)?;
 
     Ok(())
 }
@@ -401,7 +195,7 @@ fn init_logger() -> Result<RawFrameBufferInfo> {
         stride: mode_info.stride(),
     };
 
-    let logger = LOGGER.get_or_init(move || LockedLogger::new(slice, info));
+    let logger = logger::LOGGER.get_or_init(move || LockedLogger::new(slice, info));
     log::set_logger(logger).expect("logger already exists");
     log::set_max_level(log::LevelFilter::Debug);
 
@@ -417,10 +211,7 @@ struct PageTables {
     kernel_frame: PhysFrame,
 }
 
-fn create_page_tables(
-    frame_allocator: &mut UefiFrameAllocator,
-    framebuffer: &RawFrameBufferInfo,
-) -> Result<PageTables> {
+fn create_page_tables(frame_allocator: &mut UefiFrameAllocator) -> Result<PageTables> {
     let phys_offset = VirtAddr::zero();
 
     let mut bootloader_page_table = {
@@ -435,12 +226,6 @@ fn create_page_tables(
             if !old_p4[i].is_unused() {
                 new_p4[i] = old_p4[i].clone();
             }
-        }
-
-        let start_addr = VirtAddr::new(framebuffer.addr.as_u64());
-        let end_addr = start_addr + framebuffer.info.bytes_len as u64;
-        for p4 in usize::from(start_addr.p4_index())..=usize::from(end_addr.p4_index()) {
-            new_p4[p4] = old_p4[p4].clone();
         }
 
         unsafe { x86_64::registers::control::Cr3::write(new_p4_frame, Cr3Flags::empty()) };
@@ -473,11 +258,7 @@ fn create_page_tables(
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::arch::asm;
 
-    unsafe {
-        LOGGER
-            .get()
-            .map(|l| l.force_unlock())
-    };
+    unsafe { logger::LOGGER.get().map(|l| l.force_unlock()) };
     log::error!("{}", info);
 
     loop {
