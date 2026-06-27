@@ -21,7 +21,7 @@ struct RawFrameBufferInfo {
 
 fn init_logger() -> Result<RawFrameBufferInfo> {
     let graphics_output_protocol_handle =
-        *boot::locateSize16_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))?
+        *boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))?
             .first()
             .expect("failed to locate graphics output handle");
     let mut graphics_output_protocol =
@@ -66,7 +66,7 @@ fn init_logger() -> Result<RawFrameBufferInfo> {
 #[uefi::entry]
 fn main() -> Status {
     init_logger().unwrap();
-    log::info!("Andesite kernel loaded!");
+    log::info!("Andesite kernel loaded");
     log::info!("Exiting boot services...");
 
     let _mmap_iter = unsafe { boot::exit_boot_services(None) };
