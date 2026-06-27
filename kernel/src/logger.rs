@@ -7,9 +7,22 @@ use noto_sans_mono_bitmap::{
 use spinning_top::Spinlock;
 use uart_16550::Uart16550;
 
-use crate::{FrameBufferInfo, PixelFormat};
-
 pub static LOGGER: OnceCell<LockedLogger> = OnceCell::uninit();
+
+#[derive(Debug, Clone, Copy)]
+pub enum PixelFormat {
+    Rgb,
+    Bgr,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FrameBufferInfo {
+    pub bytes_len: usize,
+    pub width: usize,
+    pub height: usize,
+    pub pixel_format: PixelFormat,
+    pub stride: usize,
+}
 
 pub struct LockedLogger {
     framebuffer: Spinlock<FrameBufferWriter>,
@@ -74,12 +87,11 @@ const LINE_SPACING: usize = 2;
 const LETTER_SPACING: usize = 0;
 
 mod font_constants {
-
     use super::*;
 
     pub const CHAR_RASTER_HEIGHT: RasterHeight = RasterHeight::Size16;
     pub const CHAR_RASTER_WIDTH: usize = get_raster_width(FontWeight::Regular, CHAR_RASTER_HEIGHT);
-    pub const BACKUP_CHAR: char = '�';
+    pub const BACKUP_CHAR: char = '\u{FFFD}';
     pub const FONT_WEIGHT: FontWeight = FontWeight::Regular;
 }
 

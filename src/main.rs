@@ -16,9 +16,8 @@ fn main() {
         fs::create_dir_all(&boot).expect("failed to create BOOT directory");
     }
 
-    fs::copy(env!("BOOTLOADER_OUT"), boot.join("bootx64.efi"))
-        .expect("failed to copy bootloader.efi");
-    fs::copy(env!("KERNEL_OUT"), esp.join("kernel")).expect("failed to copy kernel");
+    fs::copy(env!("KERNEL_OUT"), boot.join("bootx64.efi"))
+        .expect("failed to copy kernel.efi to bootx64.efi");
 
     let mut qemu_cmd = Command::new("qemu-system-x86_64");
     // qemu_cmd.args(vec!["-s", "-S"]);
