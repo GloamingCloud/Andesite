@@ -2,26 +2,26 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+mod gdt;
+mod interrupts;
 mod logger;
 
+use crate::logger::{FrameBufferInfo, PixelFormat};
 use core::panic::PanicInfo;
 use uefi::{
-    prelude::*,
-    boot::{self, SearchType, MemoryDescriptor, MemoryType},
-    proto::console::gop::GraphicsOutput,
+    Identify, Result, Status,
+    boot::{self, MemoryDescriptor, MemoryType, SearchType},
     mem::memory_map::{MemoryMap, MemoryMapIter, MemoryMapMut},
-    Result, Identify,
+    proto::console::gop::GraphicsOutput,
 };
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3Flags,
     structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB, PageTableFlags
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
+        Size4KiB,
     },
-    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
-use conquer_once::spin::OnceCell;
-use crate::logger::{FrameBufferInfo, PixelFormat};
 
 #[derive(Debug, Clone, Copy)]
 struct RawFrameBufferInfo {
@@ -119,9 +119,7 @@ unsafe impl FrameAllocator<Size4KiB> for UefiFrameAllocator<'_> {
     }
 }
 
-fn configure_virtual_memory(
-    memory_map: &impl MemoryMap,
-) -> OffsetPageTable<'static> {
+fn configure_virtual_memory(memory_map: &impl MemoryMap) -> OffsetPageTable<'static> {
     let mut frame_allocator = UefiFrameAllocator::new(memory_map.entries());
     let phys_offset = VirtAddr::zero();
 
@@ -177,39 +175,6 @@ fn configure_virtual_memory(
     page_table
 }
 
-static IDT: OnceCell<InterruptDescriptorTable> = OnceCell::uninit();
-
-pub fn init_idt() {
-    let idt = IDT.get_or_init(|| {
-        let mut idt = InterruptDescriptorTable::new();
-        idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.double_fault.set_handler_fn(double_fault_handler);
-        idt.page_fault.set_handler_fn(page_fault_handler);
-        idt
-    });
-    idt.load();
-}
-
-extern "x86-interrupt" fn breakpoint_handler(
-    stack_frame: InterruptStackFrame
-) {
-    log::info!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
-}
-
-extern "x86-interrupt" fn double_fault_handler(
-    stack_frame: InterruptStackFrame,
-    _error_code: u64,
-) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
-}
-
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-) {
-    log::error!("page fault");
-}
-
 #[uefi::entry]
 fn main() -> Status {
     init_logger().unwrap();
@@ -224,20 +189,16 @@ fn main() -> Status {
     let _page_table = configure_virtual_memory(&memory_map);
     log::info!("Virtual memory configured successfully with physical memory offset!");
 
-    init_idt();
+    interrupts::init_idt();
     log::info!("IDT initialized successfully!");
+
+    gdt::init();
+    log::info!("GDT initialized successfully!");
 
     x86_64::instructions::interrupts::int3();
     log::info!("Breakpoint exception handled successfully!");
 
-    let ptr = 0xdead_be00_0000u64 as *mut u64;
-    
-    unsafe {
-        // 尝试向该地址写入数据，CPU 会瞬间断流并抛出 #PF
-        core::ptr::write_volatile(ptr, 0x42);
-    }
-
-    log::info!("Kernel running in long mode!");
+    log::info!("Kernel running!");
 
     loop {
         unsafe { core::arch::asm!("hlt") };
