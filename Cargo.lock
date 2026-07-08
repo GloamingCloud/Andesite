@@ -228,6 +228,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "common",
+ "uefi",
 ]
 
 [[package]]

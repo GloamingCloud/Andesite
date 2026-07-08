@@ -30,7 +30,15 @@ fn bootloader_inner() -> Result<()> {
     let kernel_slice = read_file("kernel")?;
     let kernel_entrypoint = relocate_elf(kernel_slice)?;
 
-    let res = kernel_entrypoint(KernelParameters { sth: 114 });
+    let st_ptr = uefi::table::system_table_raw()
+        .expect("SystemTable not set by entry point")
+        .as_ptr() as *const core::ffi::c_void;
+    let _mmap = unsafe { uefi::boot::exit_boot_services(None) };
+
+    let res = kernel_entrypoint(KernelParameters {
+        sth: 114,
+        system_table: st_ptr,
+    });
 
     log::info!("kernel returned with {:?}", res);
 
