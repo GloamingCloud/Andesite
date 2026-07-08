@@ -9,6 +9,6 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "sysv64" fn _start() -> ! {
-    loop {}
+pub extern "C" fn _start() -> usize {
+    return 42;
 }

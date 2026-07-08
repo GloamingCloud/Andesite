@@ -26,9 +26,12 @@ fn bootloader_inner() -> Result<()> {
     init_logger()?;
     log::info!("Something isn't it?");
 
-    let kernel_slice = read_file("kernel").unwrap();
-    let parsed_kernel = elf::ElfBytes::<AnyEndian>::minimal_parse(kernel_slice)
-        .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
+    let kernel_slice = read_file("kernel")?;
+    let kernel_entrypoint = relocate_elf(kernel_slice)?;
+
+    let res = kernel_entrypoint();
+
+    log::info!("kernel returned with {:?}", res);
 
     Ok(())
 }
@@ -83,6 +86,64 @@ fn init_logger() -> Result<()> {
     log::set_max_level(log::LevelFilter::Debug);
 
     Ok(())
+}
+
+fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "C" fn() -> usize> {
+    let parsed_elf = elf::ElfBytes::<AnyEndian>::minimal_parse(elf_buffer)
+        .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
+
+    let mut mem_min = u64::MAX;
+    let mut mem_max = u64::MIN;
+    if let Some(segments) = parsed_elf.segments() {
+        for program_header in segments {
+            if program_header.p_type == elf::abi::PT_LOAD {
+                let start_addr = program_header.p_paddr;
+                let mut end_addr = start_addr + program_header.p_memsz;
+                let mask = program_header.p_align - 1;
+                end_addr = (end_addr + mask) & !mask;
+                if start_addr < mem_min {
+                    mem_min = start_addr;
+                }
+                if end_addr > mem_max {
+                    mem_max = end_addr;
+                }
+            }
+        }
+    }
+
+    let pages_needed = (mem_max - mem_min + 4065) / 4096;
+
+    let program_buffer = boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_CODE,
+        pages_needed as usize,
+    )?
+    .as_ptr();
+
+    unsafe {
+        core::ptr::write_bytes(program_buffer, 0, pages_needed as usize * 4096);
+    }
+
+    if let Some(segments) = parsed_elf.segments() {
+        for program_header in segments {
+            if program_header.p_type == elf::abi::PT_LOAD {
+                let relative_offset = (program_header.p_vaddr) - mem_min;
+                let dst = unsafe { program_buffer.add(relative_offset as usize) };
+                let src = unsafe { elf_buffer.as_ptr().add(program_header.p_offset as usize) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, dst, program_header.p_filesz as usize);
+                }
+            }
+        }
+    }
+
+    let entry_point = unsafe {
+        core::mem::transmute(
+            program_buffer.add(parsed_elf.ehdr.e_entry as usize - mem_min as usize),
+        )
+    };
+
+    Ok(entry_point)
 }
 
 #[cfg(not(test))]
