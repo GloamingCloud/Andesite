@@ -3,6 +3,7 @@
 
 mod logger;
 
+use common::KernelParameters;
 use elf::endian::AnyEndian;
 use uefi::{
     CStr16, Error, Identify, Result, Status,
@@ -29,7 +30,7 @@ fn bootloader_inner() -> Result<()> {
     let kernel_slice = read_file("kernel")?;
     let kernel_entrypoint = relocate_elf(kernel_slice)?;
 
-    let res = kernel_entrypoint();
+    let res = kernel_entrypoint(KernelParameters { sth: 114 });
 
     log::info!("kernel returned with {:?}", res);
 
@@ -88,7 +89,7 @@ fn init_logger() -> Result<()> {
     Ok(())
 }
 
-fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "C" fn() -> usize> {
+fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "sysv64" fn(KernelParameters) -> usize> {
     let parsed_elf = elf::ElfBytes::<AnyEndian>::minimal_parse(elf_buffer)
         .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
 
@@ -97,7 +98,7 @@ fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "C" fn() -> usize> {
     if let Some(segments) = parsed_elf.segments() {
         for program_header in segments {
             if program_header.p_type == elf::abi::PT_LOAD {
-                let start_addr = program_header.p_paddr;
+                let start_addr = program_header.p_vaddr;
                 let mut end_addr = start_addr + program_header.p_memsz;
                 let mask = program_header.p_align - 1;
                 end_addr = (end_addr + mask) & !mask;
@@ -111,7 +112,7 @@ fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "C" fn() -> usize> {
         }
     }
 
-    let pages_needed = (mem_max - mem_min + 4065) / 4096;
+    let pages_needed = (mem_max - mem_min + 4095) / 4096;
 
     let program_buffer = boot::allocate_pages(
         AllocateType::AnyPages,

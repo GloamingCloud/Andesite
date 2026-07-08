@@ -11,13 +11,4 @@ spinning_top = "0.3.0"
 uart_16550 = "0.6.0"
 uefi = { version = "0.36.1" }
 x86_64 = "0.15.4"
-
-[dependencies.noto-sans-mono-bitmap]
-version = "0.3.2"
-default-features = false
-features = [
-    "regular",
-    "size_16",
-    "unicode-basic-latin",
-    "unicode-specials",
-]
+common = { path = "../common" }

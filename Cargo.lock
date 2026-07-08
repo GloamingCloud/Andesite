@@ -40,10 +40,10 @@ dependencies = [
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
+ "common",
  "conquer-once",
  "elf",
  "log",
- "noto-sans-mono-bitmap",
  "spinning_top",
  "uart_16550",
  "uefi",
@@ -77,6 +77,10 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "common"
+version = "0.1.0"
 
 [[package]]
 name = "conquer-once"
@@ -222,6 +226,9 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 [[package]]
 name = "kernel"
 version = "0.1.0"
+dependencies = [
+ "common",
+]
 
 [[package]]
 name = "libc"
@@ -270,12 +277,6 @@ dependencies = [
  "byteorder",
  "crc",
 ]
-
-[[package]]
-name = "noto-sans-mono-bitmap"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f102c477fd4ec864c149803bf606ecc23bc9329602ec0f99073a728abf454abc"
 
 [[package]]
 name = "once_cell"
