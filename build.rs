@@ -59,14 +59,15 @@ fn build_kernel() {
     cmd.arg("-p").arg("kernel");
     cmd.arg("--target").arg("x86_64-unknown-none");
     cmd.arg("--target-dir").arg(&out_dir);
-    cmd.arg("--release");
+    // cmd.arg("--release");
 
     let status = cmd.status().expect("failed to build kernel");
 
     if status.success() {
         let kernel = out_dir
             .join("x86_64-unknown-none")
-            .join("release")
+            // .join("release")
+            .join("debug")
             .join("kernel");
         println!("{}", kernel.display());
         assert!(kernel.exists(), "kernel expected");

@@ -62,10 +62,11 @@ fn read_file(filename: &str) -> Result<&[u8]> {
         FileType::Regular(file) => file,
         FileType::Dir(_) => unimplemented!("file expected: {}", filename),
     };
+    let pages_needed = (file_info.file_size() as usize + 4095) / 4096;
     let file_ptr = boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
-        file_info.file_size() as usize,
+        pages_needed,
     )?
     .as_ptr();
 
@@ -133,6 +134,23 @@ fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "sysv64" fn(KernelParameters
                 let src = unsafe { elf_buffer.as_ptr().add(program_header.p_offset as usize) };
                 unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, program_header.p_filesz as usize);
+                }
+            }
+        }
+    }
+
+    if let Ok(Some(rela_shdr)) = parsed_elf.section_header_by_name(".rela.dyn") {
+        if let Ok(relas) = parsed_elf.section_data_as_relas(&rela_shdr) {
+            let load_base = program_buffer as u64 - mem_min;
+            for rela in relas {
+                if rela.r_type == elf::abi::R_X86_64_RELATIVE {
+                    let target = unsafe {
+                        program_buffer
+                            .add(rela.r_offset as usize - mem_min as usize)
+                            .cast::<u64>()
+                    };
+                    let value = load_base.wrapping_add(rela.r_addend as u64);
+                    unsafe { core::ptr::write(target, value) };
                 }
             }
         }
