@@ -17,6 +17,7 @@ impl LockedLogger {
         }
     }
 
+    #[allow(dead_code)]
     pub unsafe fn force_unlock(&self) {
         unsafe {
             self.serial.force_unlock();
