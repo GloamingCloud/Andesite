@@ -36,7 +36,6 @@ fn bootloader_inner() -> Result<()> {
     let _mmap = unsafe { uefi::boot::exit_boot_services(None) };
 
     let res = kernel_entrypoint(KernelParameters {
-        sth: 114,
         system_table: st_ptr,
     });
 
