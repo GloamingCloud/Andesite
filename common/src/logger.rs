@@ -70,3 +70,11 @@ impl fmt::Write for SerialWriter {
         Ok(())
     }
 }
+
+pub fn init_logger() -> crate::Result<()> {
+    let logger = LOGGER.get_or_init(move || LockedLogger::new());
+    log::set_logger(logger).expect("logger already exists");
+    log::set_max_level(log::LevelFilter::Debug);
+
+    Ok(())
+}

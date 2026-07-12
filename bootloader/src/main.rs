@@ -1,9 +1,7 @@
 #![no_std]
 #![no_main]
 
-mod logger;
-
-use common::KernelParameters;
+use common::{KernelParameters, MemMap};
 use elf::endian::AnyEndian;
 use uefi::{
     CStr16, Error, Identify, Result, Status,
@@ -14,8 +12,6 @@ use uefi::{
     },
 };
 
-use crate::logger::LockedLogger;
-
 #[uefi::entry]
 fn main() -> uefi::Status {
     bootloader_inner().unwrap();
@@ -24,7 +20,7 @@ fn main() -> uefi::Status {
 }
 
 fn bootloader_inner() -> Result<()> {
-    init_logger()?;
+    common::logger::init_logger().map_err(|_| Status::INVALID_PARAMETER)?;
     log::info!("Something isn't it?");
 
     let kernel_slice = read_file("kernel")?;
@@ -33,15 +29,12 @@ fn bootloader_inner() -> Result<()> {
     let st_ptr = uefi::table::system_table_raw()
         .expect("SystemTable not set by entry point")
         .as_ptr() as *const core::ffi::c_void;
-    let _mmap = unsafe { uefi::boot::exit_boot_services(None) };
+    let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
 
-    let res = kernel_entrypoint(KernelParameters {
+    kernel_entrypoint(KernelParameters {
         system_table: st_ptr,
+        memory_map: MemMap::new(&memory_map),
     });
-
-    log::info!("kernel returned with {:?}", res);
-
-    Ok(())
 }
 
 fn read_file(filename: &str) -> Result<&[u8]> {
@@ -89,15 +82,7 @@ fn read_file(filename: &str) -> Result<&[u8]> {
     Ok(file_slice)
 }
 
-fn init_logger() -> Result<()> {
-    let logger = logger::LOGGER.get_or_init(move || LockedLogger::new());
-    log::set_logger(logger).expect("logger already exists");
-    log::set_max_level(log::LevelFilter::Debug);
-
-    Ok(())
-}
-
-fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "sysv64" fn(KernelParameters) -> usize> {
+fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "sysv64" fn(KernelParameters) -> !> {
     let parsed_elf = elf::ElfBytes::<AnyEndian>::minimal_parse(elf_buffer)
         .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
 
@@ -177,7 +162,7 @@ fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "sysv64" fn(KernelParameters
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::arch::asm;
 
-    unsafe { logger::LOGGER.get().map(|l| l.force_unlock()) };
+    unsafe { common::logger::LOGGER.get().map(|l| l.force_unlock()) };
     log::error!("{}", info);
 
     loop {

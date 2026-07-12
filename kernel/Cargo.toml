@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 common = { path = "../common" }
+log = "0.4.32"
 uefi = { version = "0.36.1", default-features = false }
+x86_64 = "0.15.4"

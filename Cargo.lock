@@ -41,11 +41,8 @@ name = "bootloader"
 version = "0.1.0"
 dependencies = [
  "common",
- "conquer-once",
  "elf",
  "log",
- "spinning_top",
- "uart_16550",
  "uefi",
  "x86_64",
 ]
@@ -81,6 +78,13 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "common"
 version = "0.1.0"
+dependencies = [
+ "conquer-once",
+ "log",
+ "spinning_top",
+ "uart_16550",
+ "uefi",
+]
 
 [[package]]
 name = "conquer-once"
@@ -228,7 +232,9 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "common",
+ "log",
  "uefi",
+ "x86_64",
 ]
 
 [[package]]
