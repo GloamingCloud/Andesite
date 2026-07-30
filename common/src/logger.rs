@@ -4,6 +4,8 @@ use conquer_once::spin::OnceCell;
 use spinning_top::Spinlock;
 use uart_16550::Uart16550;
 
+use crate::{ErrorType, Result};
+
 pub static LOGGER: OnceCell<LockedLogger> = OnceCell::uninit();
 
 pub struct LockedLogger {
@@ -11,10 +13,10 @@ pub struct LockedLogger {
 }
 
 impl LockedLogger {
-    pub fn new() -> Self {
-        Self {
-            serial: Spinlock::new(unsafe { SerialWriter::new() }),
-        }
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            serial: Spinlock::new(unsafe { SerialWriter::new()? }),
+        })
     }
 
     #[allow(dead_code)]
@@ -56,10 +58,12 @@ struct SerialWriter {
 }
 
 impl SerialWriter {
-    unsafe fn new() -> Self {
-        let mut port = unsafe { Uart16550::new_port(0x3f8) }.unwrap();
-        port.init(uart_16550::Config::default()).unwrap();
-        Self { port }
+    unsafe fn new() -> Result<Self> {
+        let mut port =
+            unsafe { Uart16550::new_port(0x3f8) }.map_err(|_| ErrorType::InvalidArgument)?;
+        port.init(uart_16550::Config::default())
+            .map_err(|_| ErrorType::DeviceNotReady)?;
+        Ok(Self { port })
     }
 }
 
@@ -72,8 +76,9 @@ impl fmt::Write for SerialWriter {
 }
 
 pub fn init_logger() -> crate::Result<()> {
-    let logger = LOGGER.get_or_init(move || LockedLogger::new());
-    log::set_logger(logger).expect("logger already exists");
+    let logger = LockedLogger::new()?;
+    let logger = LOGGER.get_or_init(move || logger);
+    log::set_logger(logger).map_err(|_| ErrorType::AlreadyExist)?;
     log::set_max_level(log::LevelFilter::Debug);
 
     Ok(())

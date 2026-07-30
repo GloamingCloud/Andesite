@@ -84,6 +84,7 @@ dependencies = [
  "spinning_top",
  "uart_16550",
  "uefi",
+ "x86_64",
 ]
 
 [[package]]

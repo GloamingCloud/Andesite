@@ -37,13 +37,16 @@ impl MemMap {
 #[repr(C)]
 pub struct KernelParameters {
     pub system_table: *const core::ffi::c_void,
-    pub memory_map: MemMap,
+    // pub memory_map: MemMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorType {
     NullParameter,
     InvalidData,
+    AlreadyExist,
+    DeviceNotReady,
+    InvalidArgument,
 }
 
 pub type Result<T> = core::result::Result<T, ErrorType>;

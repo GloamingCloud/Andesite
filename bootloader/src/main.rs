@@ -1,16 +1,24 @@
 #![no_std]
 #![no_main]
 
-use common::{KernelParameters, MemMap};
-use elf::endian::AnyEndian;
+mod elf;
+mod memory;
+
 use uefi::{
-    CStr16, Error, Identify, Result, Status,
+    CStr16, Identify, Result, Status,
     boot::{self, AllocateType, MemoryType, SearchType},
+    mem::memory_map::{MemoryMap, MemoryMapMut},
     proto::media::{
         file::{File, FileAttribute, FileInfo, FileMode, FileType},
         fs::SimpleFileSystem,
     },
 };
+use x86_64::{
+    VirtAddr,
+    structures::paging::{FrameAllocator, OffsetPageTable, PageTable},
+};
+
+use crate::memory::UefiLegacyFrameAllocator;
 
 #[uefi::entry]
 fn main() -> uefi::Status {
@@ -21,20 +29,52 @@ fn main() -> uefi::Status {
 
 fn bootloader_inner() -> Result<()> {
     common::logger::init_logger().map_err(|_| Status::INVALID_PARAMETER)?;
-    log::info!("Something isn't it?");
+    log::info!("Starting bootloader...");
 
     let kernel_slice = read_file("kernel")?;
-    let kernel_entrypoint = relocate_elf(kernel_slice)?;
 
-    let st_ptr = uefi::table::system_table_raw()
-        .expect("SystemTable not set by entry point")
+    let mut memory_map = unsafe { boot::exit_boot_services(None) };
+    memory_map.sort();
+
+    let mut frame_allocator = UefiLegacyFrameAllocator::new(memory_map.entries());
+
+    let (mut kernel_page_table, kernel_page_table_frame) = {
+        let frame = frame_allocator
+            .allocate_frame()
+            .expect("failed to allocate frame for kernel page table");
+        let addr = VirtAddr::zero() + frame.start_address().as_u64();
+        let ptr = addr.as_mut_ptr();
+        unsafe { *ptr = PageTable::new() };
+        let level_4_page_table = unsafe { &mut *ptr };
+
+        // Copy the lower 256 entries from the active UEFI PML4 table to preserve identity mapping
+        let (active_p4_frame, _) = x86_64::registers::control::Cr3::read();
+        let active_p4_ptr = active_p4_frame.start_address().as_u64() as *const PageTable;
+        let active_p4 = unsafe { &*active_p4_ptr };
+        for i in 0..256 {
+            level_4_page_table[i] = active_p4[i].clone();
+        }
+
+        (
+            unsafe { OffsetPageTable::new(level_4_page_table, VirtAddr::zero()) },
+            frame,
+        )
+    };
+
+    let high_base = VirtAddr::new(0xffffffff80000000);
+    
+
+    // Retrieve raw system table pointer
+    let system_table = uefi::table::system_table_raw()
+        .expect("Failed to get raw system table")
         .as_ptr() as *const core::ffi::c_void;
-    let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
 
-    kernel_entrypoint(KernelParameters {
-        system_table: st_ptr,
-        memory_map: MemMap::new(&memory_map),
-    });
+    // Prepare kernel parameters with system table pointer
+    let params = common::KernelParameters {
+        system_table,
+    };
+
+    Ok(())
 }
 
 fn read_file(filename: &str) -> Result<&[u8]> {
@@ -80,81 +120,6 @@ fn read_file(filename: &str) -> Result<&[u8]> {
     file.read(file_slice)?;
 
     Ok(file_slice)
-}
-
-fn relocate_elf(elf_buffer: &[u8]) -> Result<extern "sysv64" fn(KernelParameters) -> !> {
-    let parsed_elf = elf::ElfBytes::<AnyEndian>::minimal_parse(elf_buffer)
-        .map_err(|_| Error::new(Status::INVALID_PARAMETER, ()))?;
-
-    let mut mem_min = u64::MAX;
-    let mut mem_max = u64::MIN;
-    if let Some(segments) = parsed_elf.segments() {
-        for program_header in segments {
-            if program_header.p_type == elf::abi::PT_LOAD {
-                let start_addr = program_header.p_vaddr;
-                let mut end_addr = start_addr + program_header.p_memsz;
-                let mask = program_header.p_align - 1;
-                end_addr = (end_addr + mask) & !mask;
-                if start_addr < mem_min {
-                    mem_min = start_addr;
-                }
-                if end_addr > mem_max {
-                    mem_max = end_addr;
-                }
-            }
-        }
-    }
-
-    let pages_needed = (mem_max - mem_min + 4095) / 4096;
-
-    let program_buffer = boot::allocate_pages(
-        AllocateType::AnyPages,
-        MemoryType::LOADER_CODE,
-        pages_needed as usize,
-    )?
-    .as_ptr();
-
-    unsafe {
-        core::ptr::write_bytes(program_buffer, 0, pages_needed as usize * 4096);
-    }
-
-    if let Some(segments) = parsed_elf.segments() {
-        for program_header in segments {
-            if program_header.p_type == elf::abi::PT_LOAD {
-                let relative_offset = (program_header.p_vaddr) - mem_min;
-                let dst = unsafe { program_buffer.add(relative_offset as usize) };
-                let src = unsafe { elf_buffer.as_ptr().add(program_header.p_offset as usize) };
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst, program_header.p_filesz as usize);
-                }
-            }
-        }
-    }
-
-    if let Ok(Some(rela_shdr)) = parsed_elf.section_header_by_name(".rela.dyn") {
-        if let Ok(relas) = parsed_elf.section_data_as_relas(&rela_shdr) {
-            let load_base = program_buffer as u64 - mem_min;
-            for rela in relas {
-                if rela.r_type == elf::abi::R_X86_64_RELATIVE {
-                    let target = unsafe {
-                        program_buffer
-                            .add(rela.r_offset as usize - mem_min as usize)
-                            .cast::<u64>()
-                    };
-                    let value = load_base.wrapping_add(rela.r_addend as u64);
-                    unsafe { core::ptr::write(target, value) };
-                }
-            }
-        }
-    }
-
-    let entry_point = unsafe {
-        core::mem::transmute(
-            program_buffer.add(parsed_elf.ehdr.e_entry as usize - mem_min as usize),
-        )
-    };
-
-    Ok(entry_point)
 }
 
 #[cfg(not(test))]
