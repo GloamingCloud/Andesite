@@ -18,12 +18,33 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
 
+    const kernel = b.addExecutable(.{
+        .name = "kernel",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("kernel/main.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .x86_64,
+                .os_tag = .freestanding,
+                .ofmt = .elf,
+            }),
+            .optimize = optimize,
+            .code_model = .kernel,
+        }),
+        .linkage = .static,
+    });
+    kernel.entry = .{ .symbol_name = "kernelEntry" };
+
     const esp_dir = "esp";
     const install_bootloader = b.addInstallFile(
         bootloader.getEmittedBin(),
         b.fmt("{s}/efi/boot/BOOTX64.EFI", .{esp_dir}),
     );
     b.getInstallStep().dependOn(&install_bootloader.step);
+    const install_kernel = b.addInstallFile(
+        kernel.getEmittedBin(),
+        b.fmt("{s}/kernel", .{esp_dir}),
+    );
+    b.getInstallStep().dependOn(&install_kernel.step);
 
     const qemu_args = [_][]const u8{
         "qemu-system-x86_64",
