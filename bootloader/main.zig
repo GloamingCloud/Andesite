@@ -4,6 +4,7 @@ const log = std.log.scoped(.bootloader);
 const elf = std.elf;
 
 const blog = @import("logger.zig");
+const arch = @import("lib.zig").arch;
 
 pub const std_options = std.Options{
     .logFn = blog.log,
@@ -34,8 +35,9 @@ pub fn main() uefi.Status {
         return .aborted;
     };
 
+    const kernel_executable_path: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("kernel");
     const kernel_file = root_dir.open(
-        &toUtf16("kernel"),
+        kernel_executable_path,
         .read,
         .{
             .read_only = true,
@@ -78,15 +80,15 @@ pub fn main() uefi.Status {
         },
     );
 
+    arch.page.setLv4Writable(boot_service) catch |err| {
+        log.err("Failed to set lv4 page writable: {any}", .{err});
+        return .aborted;
+    };
+    arch.page.map4kTo(0xFFFF_FFFF_DEAD_0000, 0x10_0000, .read_write, boot_service) catch |err| {
+        log.err("Failed to map 4kib page: {any}", .{err});
+        return .aborted;
+    };
+
     while (true) asm volatile ("hlt");
     return .success;
-}
-
-inline fn toUtf16(comptime s: [:0]const u8) [s.len * 2:0]u16 {
-    var utf16: [s.len * 2:0]u16 = [_:0]u16{0} ** (s.len * 2);
-    for (s, 0..) |c, i| {
-        utf16[i] = c;
-        utf16[i + 1] = 0;
-    }
-    return utf16;
 }

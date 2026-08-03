@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
     kernel.entry = .{ .symbol_name = "kernelEntry" };
+    kernel.linker_script = b.path("kernel/linker.ld");
 
     const esp_dir = "esp";
     const install_bootloader = b.addInstallFile(
