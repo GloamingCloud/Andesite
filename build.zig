@@ -18,6 +18,10 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
 
+    const bootloader_module = b.createModule(.{
+        .root_source_file = b.path("bootloader/defs.zig"),
+    });
+
     const kernel = b.addExecutable(.{
         .name = "kernel",
         .root_module = b.createModule(.{
@@ -37,6 +41,7 @@ pub fn build(b: *std.Build) void {
     });
     kernel.entry = .{ .symbol_name = "kernelEntry" };
     kernel.linker_script = b.path("kernel/linker.ld");
+    kernel.root_module.addImport("bootloader", bootloader_module);
 
     const esp_dir = "esp";
     const install_bootloader = b.addInstallFile(

@@ -5,6 +5,7 @@ const elf = std.elf;
 
 const blog = @import("logger.zig");
 const arch = @import("lib.zig").arch;
+const defs = @import("defs.zig");
 
 pub const std_options = std.Options{
     .logFn = blog.log,
@@ -23,6 +24,8 @@ const BootloaderError = error{
     ErrorParsing,
     CleaningUp,
 };
+
+const KernelEntryType = fn (defs.BootInfo) callconv(.{ .x86_64_win = .{} }) noreturn;
 
 fn bootloader() !void {
     const console_output = uefi.system_table.con_out orelse return BootloaderError.NoOutput;
@@ -90,7 +93,7 @@ fn bootloader() !void {
     }
 
     const pages_4kib = (kernel_end_phys - kernel_start_phys + 4095) / 4096;
-    log.info("Kernel image: 0x{X:0>16} - 0x{X:0>16} (0x{X} pages)", .{ kernel_start_phys, kernel_end_phys, pages_4kib });
+    log.info("kernel image: 0x{X:0>16} - 0x{X:0>16} (0x{X} pages)", .{ kernel_start_phys, kernel_end_phys, pages_4kib });
 
     _ = boot_service.allocatePages(
         .{
@@ -119,13 +122,15 @@ fn bootloader() !void {
         const segment: [*]u8 = @ptrFromInt(phdr.p_vaddr);
         @memcpy(segment, kernel_buffer[phdr.p_offset .. phdr.p_offset + phdr.p_memsz]);
 
-        log.info("  Segment @ 0x{X:0>16} - 0x{X:0>16}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
+        log.info("  segment @ 0x{X:0>16} - 0x{X:0>16}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
 
         const zero_count = phdr.p_memsz - phdr.p_filesz;
         if (zero_count > 0) {
             boot_service._setMem(@ptrFromInt(phdr.p_vaddr + phdr.p_filesz), zero_count, 0);
         }
     }
+    log.info("kernel entry: 0x{X:0>16}", .{elf_header.entry});
+    const kernel_entry: *KernelEntryType = @ptrFromInt(elf_header.entry);
 
     // cleaning up
     boot_service.freePool(kernel_buffer.ptr) catch return BootloaderError.CleaningUp;
@@ -133,8 +138,29 @@ fn bootloader() !void {
     kernel_file.close() catch return BootloaderError.CleaningUp;
     root_dir.close() catch return BootloaderError.CleaningUp;
 
-    while (true) asm volatile ("hlt");
-    return .success;
+    log.info("exiting boot services", .{});
+    const memory_map_info = try boot_service.getMemoryMapInfo();
+    const memory_map_buffer = try boot_service.allocatePool(
+        .loader_data,
+        memory_map_info.descriptor_size * (memory_map_info.len + 1),
+    );
+    const memory_map = try boot_service.getMemoryMap(memory_map_buffer);
+
+    try boot_service.exitBootServices(uefi.handle, memory_map.info.key);
+
+    const boot_info = defs.BootInfo{
+        .memory_map = defs.MemoryMap{
+            .key = memory_map.info.key,
+            .descriptor_size = memory_map.info.descriptor_size,
+            .descriptor_version = memory_map.info.descriptor_version,
+            .len = memory_map.info.len,
+            .descriptors = @ptrCast(@alignCast(memory_map.ptr)),
+        },
+    };
+
+    kernel_entry(boot_info);
+
+    unreachable;
 }
 
 pub fn main() uefi.Status {
