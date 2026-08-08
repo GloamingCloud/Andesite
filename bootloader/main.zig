@@ -10,35 +10,38 @@ pub const std_options = std.Options{
     .logFn = blog.log,
 };
 
-pub fn main() uefi.Status {
-    const console_output = uefi.system_table.con_out orelse return .aborted;
+const BootloaderError = error{
+    NoOutput,
+    NoBootService,
+    SetPageTableWritableFailed,
+    SimpleFileSystemNotFound,
+    FailOpeningVolume,
+    FailOpeningFile,
+    NoMemory,
+    FailFetchingInfo,
+    IO,
+    ErrorParsing,
+    CleaningUp,
+};
+
+fn bootloader() !void {
+    const console_output = uefi.system_table.con_out orelse return BootloaderError.NoOutput;
     console_output.clearScreen() catch unreachable;
 
     blog.init(console_output);
     log.info("into bootloader, logger working", .{});
 
-    const boot_service = uefi.system_table.boot_services orelse {
-        log.err("failed to get boot service", .{});
-        return .aborted;
-    };
+    const boot_service = uefi.system_table.boot_services orelse return BootloaderError.NoBootService;
 
-    arch.page.setLv4Writable(boot_service) catch |err| {
-        log.err("Failed to set lv4 page writable: {any}", .{err});
-        return .aborted;
-    };
+    arch.page.setLv4Writable(boot_service) catch return BootloaderError.SetPageTableWritableFailed;
 
     const simple_file_system_protocol = boot_service.locateProtocol(
         uefi.protocol.SimpleFileSystem,
         null,
-    ) catch null orelse {
-        log.err("failed to get simple file system protocol", .{});
-        return .aborted;
-    };
+    ) catch null orelse return BootloaderError.SimpleFileSystemNotFound;
 
-    const root_dir = simple_file_system_protocol.openVolume() catch {
-        log.err("failed to open volume", .{});
-        return .aborted;
-    };
+    const root_dir = simple_file_system_protocol.openVolume() catch return BootloaderError.FailOpeningVolume;
+    errdefer root_dir.close() catch unreachable;
 
     const kernel_executable_path: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("kernel");
     const kernel_file = root_dir.open(
@@ -48,40 +51,28 @@ pub fn main() uefi.Status {
             .read_only = true,
             .directory = false,
         },
-    ) catch {
-        log.err("failed to open kernel file", .{});
-        return .aborted;
-    };
+    ) catch return BootloaderError.FailOpeningFile;
+    errdefer kernel_file.close() catch unreachable;
 
-    const kernel_file_info_size = kernel_file.getInfoSize(.file) catch {
-        log.err("failed to get size required for file info", .{});
-        return .aborted;
-    };
-    const kernel_file_info_buffer = boot_service.allocatePool(.loader_data, kernel_file_info_size) catch {
-        log.err("failed to allocate memory for file info", .{});
-        return .aborted;
-    };
-    const kernel_file_info = kernel_file.getInfo(.file, kernel_file_info_buffer) catch {
-        log.err("failed to read kernel file info", .{});
-        return .aborted;
-    };
+    const kernel_file_info_size = kernel_file.getInfoSize(.file) catch return BootloaderError.FailFetchingInfo;
+    const kernel_file_info_buffer = boot_service.allocatePool(
+        .loader_data,
+        kernel_file_info_size,
+    ) catch return BootloaderError.NoMemory;
+    errdefer boot_service.freePool(kernel_file_info_buffer.ptr) catch unreachable;
+    const kernel_file_info = kernel_file.getInfo(.file, kernel_file_info_buffer) catch return BootloaderError.FailFetchingInfo;
 
     log.debug("kernel file size: {}", .{kernel_file_info.file_size});
 
-    const kernel_buffer = boot_service.allocatePool(.loader_data, kernel_file_info.file_size) catch {
-        log.err("failed to allocate memory for kernel buffer", .{});
-        return .aborted;
-    };
-    _ = kernel_file.read(kernel_buffer) catch {
-        log.err("failed to read kernel", .{});
-        return .aborted;
-    };
+    const kernel_buffer = boot_service.allocatePool(
+        .loader_data,
+        kernel_file_info.file_size,
+    ) catch return BootloaderError.NoMemory;
+    errdefer boot_service.freePool(kernel_buffer.ptr) catch unreachable;
+    _ = kernel_file.read(kernel_buffer) catch return BootloaderError.IO;
 
     var fbs = std.Io.Reader.fixed(kernel_buffer);
-    const elf_header = elf.Header.read(&fbs) catch {
-        log.err("failed to take elf header out of kernel", .{});
-        return .aborted;
-    };
+    const elf_header = elf.Header.read(&fbs) catch return BootloaderError.ErrorParsing;
 
     const Addr = elf.Elf64.Addr;
     var kernel_start_virt: Addr = std.math.maxInt(Addr);
@@ -91,10 +82,7 @@ pub fn main() uefi.Status {
     var iter = elf_header.iterateProgramHeadersBuffer(kernel_buffer);
 
     while (true) {
-        const phdr = iter.next() catch |err| {
-            log.err("failed to read program header: {}", .{err});
-            return .aborted;
-        } orelse break;
+        const phdr = try iter.next() orelse break;
         if (phdr.p_type != @intFromEnum(elf.PT.LOAD)) continue;
         if (phdr.p_paddr < kernel_start_phys) kernel_start_phys = phdr.p_paddr;
         if (phdr.p_vaddr < kernel_start_virt) kernel_start_virt = phdr.p_vaddr;
@@ -110,32 +98,22 @@ pub fn main() uefi.Status {
         },
         .loader_data,
         pages_4kib,
-    ) catch |err| {
-        log.err("failed to allocate memory for kernel: {}", .{err});
-        return .aborted;
-    };
+    ) catch return BootloaderError.NoMemory;
 
     for (0..pages_4kib) |i| {
-        arch.page.map4kTo(
+        try arch.page.map4kTo(
             kernel_start_virt + 4096 * i,
             kernel_start_phys + 4096 * i,
             .read_write,
             boot_service,
-        ) catch {
-            log.err("failed to map page for kernel", .{});
-            return .aborted;
-        };
+        );
     }
     log.info("mapped memory for kernel image.", .{});
-
     log.info("loading kernel", .{});
 
     iter = elf_header.iterateProgramHeadersBuffer(kernel_buffer);
     while (true) {
-        const phdr = iter.next() catch |err| {
-            log.err("failed to read program header: {}", .{err});
-            return .aborted;
-        } orelse break;
+        const phdr = try iter.next() orelse break;
         if (phdr.p_type != @intFromEnum(elf.PT.LOAD)) continue;
 
         const segment: [*]u8 = @ptrFromInt(phdr.p_vaddr);
@@ -149,6 +127,21 @@ pub fn main() uefi.Status {
         }
     }
 
+    // cleaning up
+    boot_service.freePool(kernel_buffer.ptr) catch return BootloaderError.CleaningUp;
+    boot_service.freePool(kernel_file_info_buffer.ptr) catch return BootloaderError.CleaningUp;
+    kernel_file.close() catch return BootloaderError.CleaningUp;
+    root_dir.close() catch return BootloaderError.CleaningUp;
+
     while (true) asm volatile ("hlt");
     return .success;
+}
+
+pub fn main() uefi.Status {
+    bootloader() catch |err| {
+        log.err("bootloader failure: {s}", .{@errorName(err)});
+        return .aborted;
+    };
+
+    unreachable;
 }
