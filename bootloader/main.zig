@@ -15,10 +15,15 @@ pub fn main() uefi.Status {
     console_output.clearScreen() catch unreachable;
 
     blog.init(console_output);
-    log.debug("into bootloader, logger working", .{});
+    log.info("into bootloader, logger working", .{});
 
     const boot_service = uefi.system_table.boot_services orelse {
         log.err("failed to get boot service", .{});
+        return .aborted;
+    };
+
+    arch.page.setLv4Writable(boot_service) catch |err| {
+        log.err("Failed to set lv4 page writable: {any}", .{err});
         return .aborted;
     };
 
@@ -48,46 +53,101 @@ pub fn main() uefi.Status {
         return .aborted;
     };
 
-    const header_size = @sizeOf(elf.Elf64.Ehdr);
-    const header_buffer = boot_service.allocatePool(.loader_data, header_size) catch {
-        log.err("failed to allocate buffer for elf header", .{});
+    const kernel_file_info_size = kernel_file.getInfoSize(.file) catch {
+        log.err("failed to get size required for file info", .{});
+        return .aborted;
+    };
+    const kernel_file_info_buffer = boot_service.allocatePool(.loader_data, kernel_file_info_size) catch {
+        log.err("failed to allocate memory for file info", .{});
+        return .aborted;
+    };
+    const kernel_file_info = kernel_file.getInfo(.file, kernel_file_info_buffer) catch {
+        log.err("failed to read kernel file info", .{});
         return .aborted;
     };
 
-    _ = kernel_file.read(header_buffer) catch {
-        log.err("failed to read kernel file", .{});
+    log.debug("kernel file size: {}", .{kernel_file_info.file_size});
+
+    const kernel_buffer = boot_service.allocatePool(.loader_data, kernel_file_info.file_size) catch {
+        log.err("failed to allocate memory for kernel buffer", .{});
+        return .aborted;
+    };
+    _ = kernel_file.read(kernel_buffer) catch {
+        log.err("failed to read kernel", .{});
         return .aborted;
     };
 
-    var fbs = std.Io.Reader.fixed(header_buffer);
+    var fbs = std.Io.Reader.fixed(kernel_buffer);
     const elf_header = elf.Header.read(&fbs) catch {
-        log.err("failed to parse elf header, bad input", .{});
+        log.err("failed to take elf header out of kernel", .{});
         return .aborted;
     };
-    log.info("parsed kernel elf header", .{});
-    log.debug(
-        \\Kernel ELF information:
-        \\  Entry Point         : 0x{X}
-        \\  Is 64-bit           : {d}
-        \\  # of Program Headers: {d}
-        \\  # of Section Headers: {d}
-    ,
-        .{
-            elf_header.entry,
-            @intFromBool(elf_header.is_64),
-            elf_header.phnum,
-            elf_header.shnum,
-        },
-    );
 
-    arch.page.setLv4Writable(boot_service) catch |err| {
-        log.err("Failed to set lv4 page writable: {any}", .{err});
+    const Addr = elf.Elf64.Addr;
+    var kernel_start_virt: Addr = std.math.maxInt(Addr);
+    var kernel_start_phys: Addr align(4096) = std.math.maxInt(Addr);
+    var kernel_end_phys: Addr = 0;
+
+    var iter = elf_header.iterateProgramHeadersBuffer(kernel_buffer);
+
+    while (true) {
+        const phdr = iter.next() catch |err| {
+            log.err("failed to read program header: {}", .{err});
+            return .aborted;
+        } orelse break;
+        if (phdr.p_type != @intFromEnum(elf.PT.LOAD)) continue;
+        if (phdr.p_paddr < kernel_start_phys) kernel_start_phys = phdr.p_paddr;
+        if (phdr.p_vaddr < kernel_start_virt) kernel_start_virt = phdr.p_vaddr;
+        if (phdr.p_paddr + phdr.p_memsz > kernel_end_phys) kernel_end_phys = phdr.p_paddr + phdr.p_memsz;
+    }
+
+    const pages_4kib = (kernel_end_phys - kernel_start_phys + 4095) / 4096;
+    log.info("Kernel image: 0x{X:0>16} - 0x{X:0>16} (0x{X} pages)", .{ kernel_start_phys, kernel_end_phys, pages_4kib });
+
+    _ = boot_service.allocatePages(
+        .{
+            .address = @ptrFromInt(kernel_start_phys),
+        },
+        .loader_data,
+        pages_4kib,
+    ) catch |err| {
+        log.err("failed to allocate memory for kernel: {}", .{err});
         return .aborted;
     };
-    arch.page.map4kTo(0xFFFF_FFFF_DEAD_0000, 0x10_0000, .read_write, boot_service) catch |err| {
-        log.err("Failed to map 4kib page: {any}", .{err});
-        return .aborted;
-    };
+
+    for (0..pages_4kib) |i| {
+        arch.page.map4kTo(
+            kernel_start_virt + 4096 * i,
+            kernel_start_phys + 4096 * i,
+            .read_write,
+            boot_service,
+        ) catch {
+            log.err("failed to map page for kernel", .{});
+            return .aborted;
+        };
+    }
+    log.info("mapped memory for kernel image.", .{});
+
+    log.info("loading kernel", .{});
+
+    iter = elf_header.iterateProgramHeadersBuffer(kernel_buffer);
+    while (true) {
+        const phdr = iter.next() catch |err| {
+            log.err("failed to read program header: {}", .{err});
+            return .aborted;
+        } orelse break;
+        if (phdr.p_type != @intFromEnum(elf.PT.LOAD)) continue;
+
+        const segment: [*]u8 = @ptrFromInt(phdr.p_vaddr);
+        @memcpy(segment, kernel_buffer[phdr.p_offset .. phdr.p_offset + phdr.p_memsz]);
+
+        log.info("  Segment @ 0x{X:0>16} - 0x{X:0>16}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
+
+        const zero_count = phdr.p_memsz - phdr.p_filesz;
+        if (zero_count > 0) {
+            boot_service._setMem(@ptrFromInt(phdr.p_vaddr + phdr.p_filesz), zero_count, 0);
+        }
+    }
 
     while (true) asm volatile ("hlt");
     return .success;

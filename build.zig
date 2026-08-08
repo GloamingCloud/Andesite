@@ -29,8 +29,11 @@ pub fn build(b: *std.Build) void {
             }),
             .optimize = optimize,
             .code_model = .kernel,
+            .strip = true,
         }),
         .linkage = .static,
+        .use_llvm = true,
+        .use_lld = true,
     });
     kernel.entry = .{ .symbol_name = "kernelEntry" };
     kernel.linker_script = b.path("kernel/linker.ld");
@@ -54,7 +57,7 @@ pub fn build(b: *std.Build) void {
         "-bios",
         "/usr/share/ovmf/x64/OVMF.4m.fd",
         "-drive",
-        b.fmt("file=fat:rw:{s}/{s}", .{ b.install_path, esp_dir }),
+        b.fmt("file=fat:rw:{s}/{s},format=raw", .{ b.install_path, esp_dir }),
         "-nographic",
         "-serial",
         "mon:stdio",
